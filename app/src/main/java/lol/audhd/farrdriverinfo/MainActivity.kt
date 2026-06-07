@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
 
         // Requests standard runtime permissions automatically on initialization
         val permissionLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
+            ActivityResultContracts.RequestMultiplePermissions(),
         ) { permissions ->
             if (permissions.values.all { it }) {
                 repository.startScanning()
@@ -72,12 +72,12 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainContent(repository: FardriverRepository) {
-    var showSettings by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(value = false) }
 
     if (showSettings) {
-        SettingsScreen(repository, onBack = { showSettings = false })
+        SettingsScreen(repository) { showSettings = false }
     } else {
-        DashboardScreen(repository, onOpenSettings = { showSettings = true })
+        DashboardScreen(repository) { showSettings = true }
     }
 }
 
@@ -85,7 +85,29 @@ fun MainContent(repository: FardriverRepository) {
 @Composable
 fun DashboardScreen(repository: FardriverRepository, onOpenSettings: () -> Unit) {
     val uiState by repository.uiState.collectAsState()
+    val settings by repository.settings.collectAsState()
     val status by repository.connectionState.collectAsState()
+
+    var showTripResetDialog by remember { mutableStateOf(value = false) }
+
+    if (showTripResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showTripResetDialog = false },
+            title = { Text("Reset Trip Meter") },
+            text = { Text("Are you sure you want to reset the trip, used Ah, and range estimation?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        repository.resetTrip()
+                        showTripResetDialog = false
+                    },
+                ) { Text("Reset", color = Color.Red) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTripResetDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -111,7 +133,7 @@ fun DashboardScreen(repository: FardriverRepository, onOpenSettings: () -> Unit)
             VerticalBatteryGauge(soc = uiState.soc, voltage = uiState.voltage, modifier = Modifier.width(70.dp).fillMaxHeight())
 
             Column(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).fillMaxHeight(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 // Connection Status Bar
@@ -130,29 +152,46 @@ fun DashboardScreen(repository: FardriverRepository, onOpenSettings: () -> Unit)
                     )
                 }
 
-                // Voltage Readout
+                // Speed Readout (Full row above Voltage)
                 DashboardCard(
-                    label = "Battery Voltage",
-                    value = String.format(Locale.US, "%.1f V", uiState.voltage),
-                    modifier = Modifier.fillMaxWidth()
+                    label = "Speed (MPH)",
+                    value = String.format(Locale.US, "%.0f", uiState.speed),
+                    modifier = Modifier.fillMaxWidth().weight(1.5f), // Larger weight for speed
+                    valueFontSize = 48.sp // Bigger font for speed
                 )
 
-                // Current Readout
-                DashboardCard(
-                    label = "Current",
-                    value = String.format(Locale.US, "%.1f A", uiState.lineCurrent),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                // Power & Gear Row
+                // Battery & Power Group
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    DashboardCard(
+                        label = "Voltage",
+                        value = String.format(Locale.US, "%.1f V", uiState.voltage),
+                        modifier = Modifier.weight(1f),
+                        valueFontSize = 24.sp,
+                        labelFontSize = 12.sp
+                    )
+                    DashboardCard(
+                        label = "Current",
+                        value = String.format(Locale.US, "%.1f A", uiState.lineCurrent),
+                        modifier = Modifier.weight(1f),
+                        valueFontSize = 24.sp,
+                        labelFontSize = 12.sp
+                    )
+                }
+
+                // Power & Gear Group
+                Row(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     DashboardCard(
                         label = "Power",
                         value = String.format(Locale.US, "%.0f W", uiState.power),
-                        modifier = Modifier.weight(0.7f)
+                        modifier = Modifier.weight(0.7f),
+                        valueFontSize = 24.sp,
+                        labelFontSize = 12.sp
                     )
                     
                     val gearColor = when (uiState.gear) {
@@ -168,40 +207,77 @@ fun DashboardScreen(repository: FardriverRepository, onOpenSettings: () -> Unit)
                         value = uiState.gear.toString(),
                         containerColor = gearColor,
                         contentColor = gearContentColor,
-                        modifier = Modifier.weight(0.3f)
+                        modifier = Modifier.weight(0.3f),
+                        valueFontSize = 24.sp,
+                        labelFontSize = 12.sp
                     )
                 }
 
-                // Secondary Telemetry & Temp Gauges Section
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    // Telemetry Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                // Stats Box (Combined Efficiency, RPM, Range, Trip, ODO, Temps)
+                DashboardCard(
+                    label = "System Stats",
+                    value = "", // Empty value, using custom content
+                    modifier = Modifier.fillMaxWidth().weight(2f)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        DashboardCard("Speed (MPH)", String.format(Locale.US, "%.0f", uiState.speed), modifier = Modifier.weight(1f))
-                        DashboardCard("RPM", String.format(Locale.US, "%.0f", uiState.rpm), modifier = Modifier.weight(1f))
-                    }
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        DashboardCard("Trip", String.format(Locale.US, "%.1f", uiState.tripMiles), modifier = Modifier.weight(1f))
-                        DashboardCard("ODO", String.format(Locale.US, "%.1f", uiState.odometerMiles), modifier = Modifier.weight(1f))
-                    }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            StatItem("Ah/Mi", String.format(Locale.US, "%.2f", uiState.ahPerMile))
+                            StatItem("Used", String.format(Locale.US, "%.1fAh", uiState.consumedAh))
+                            StatItem("Range", String.format(Locale.US, "%.1fmi", uiState.getEstimatedRange(settings.batteryAh)))
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            StatItem("RPM", String.format(Locale.US, "%.0f", uiState.rpm))
+                            StatItem("Trip", String.format(Locale.US, "%.1fmi", uiState.tripMiles))
+                            StatItem("ODO", String.format(Locale.US, "%.1fmi", uiState.odometerMiles))
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val ctrlColor = if (uiState.controllerTemp > 90) Color.Red else if (uiState.controllerTemp > 70) Color.Yellow else Color.Unspecified
+                            val motorColor = if (uiState.motorTemp > 120) Color.Red else if (uiState.motorTemp > 90) Color.Yellow else Color.Unspecified
+                            StatItem("Ctrl", "${(((uiState.controllerTemp * 9) / 5)) + 32}°F", color = ctrlColor)
 
-                    // Temp Gauges Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        TempGauge(label = "Controller", tempC = uiState.controllerTemp, modifier = Modifier.weight(1f))
-                        TempGauge(label = "Motor", tempC = uiState.motorTemp, modifier = Modifier.weight(1f))
+                            // Reset Button - Centered between temps
+                            Button(
+                                onClick = { showTripResetDialog = true },
+                                modifier = Modifier.height(24.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
+                            ) {
+                                Text("RESET", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+
+                            StatItem("Motor", "${(((uiState.motorTemp * 9) / 5)) + 32}°F", color = motorColor)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun StatItem(label: String, value: String, color: Color = Color.Unspecified) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            label.uppercase(Locale.US),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+        )
+        Text(
+            value,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = if (color == Color.Unspecified) MaterialTheme.colorScheme.onSurface else color,
+        )
     }
 }
 
@@ -213,8 +289,9 @@ fun SettingsScreen(repository: FardriverRepository, onBack: () -> Unit) {
     var wheelCirc by remember(settings) { mutableStateOf(settings.wheelCircumferenceM.toString()) }
     var polePairs by remember(settings) { mutableStateOf(settings.motorPolePairs.toString()) }
     var speedMult by remember(settings) { mutableStateOf(settings.speedMultiplier.toString()) }
+    var batteryAh by remember(settings) { mutableStateOf(settings.batteryAh.toString()) }
 
-    var showTripResetDialog by remember { mutableStateOf(false) }
+    var showTripResetDialog by remember { mutableStateOf(value = false) }
 
     if (showTripResetDialog) {
         AlertDialog(
@@ -222,10 +299,12 @@ fun SettingsScreen(repository: FardriverRepository, onBack: () -> Unit) {
             title = { Text("Reset Trip Meter") },
             text = { Text("Are you sure you want to reset the trip meter to 0.0 miles?") },
             confirmButton = {
-                TextButton(onClick = {
-                    repository.resetTrip()
-                    showTripResetDialog = false
-                }) { Text("Reset", color = Color.Red) }
+                TextButton(
+                    onClick = {
+                        repository.resetTrip()
+                        showTripResetDialog = false
+                    },
+                ) { Text("Reset", color = Color.Red) }
             },
             dismissButton = {
                 TextButton(onClick = { showTripResetDialog = false }) { Text("Cancel") }
@@ -298,6 +377,16 @@ fun SettingsScreen(repository: FardriverRepository, onBack: () -> Unit) {
                 supportingText = { Text("Adjust this to calibrate against GPS speed") }
             )
 
+            OutlinedTextField(
+                value = batteryAh,
+                onValueChange = { batteryAh = it },
+                label = { Text("Battery Capacity (Ah)") },
+                placeholder = { Text("e.g. 20.0") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("Total Amp-hours of your battery pack") }
+            )
+
             HorizontalDivider()
 
             Text(
@@ -321,7 +410,8 @@ fun SettingsScreen(repository: FardriverRepository, onBack: () -> Unit) {
                     val newSettings = FardriverSettings(
                         wheelCircumferenceM = wheelCirc.toFloatOrNull() ?: settings.wheelCircumferenceM,
                         motorPolePairs = polePairs.toIntOrNull() ?: settings.motorPolePairs,
-                        speedMultiplier = speedMult.toFloatOrNull() ?: settings.speedMultiplier
+                        speedMultiplier = speedMult.toFloatOrNull() ?: settings.speedMultiplier,
+                        batteryAh = batteryAh.toFloatOrNull() ?: settings.batteryAh
                     )
                     repository.updateSettings(newSettings)
                     onBack()
@@ -405,31 +495,15 @@ fun VerticalBatteryGauge(soc: Int, voltage: Float, modifier: Modifier = Modifier
 }
 
 @Composable
-fun TempGauge(label: String, tempC: Int, modifier: Modifier = Modifier) {
-    val tempF = (tempC * 9 / 5) + 32
-    val color = when {
-        tempF > 248 -> Color(0xFFD32F2F) // Red (>120C)
-        tempF > 194 -> Color(0xFFFBC02D)  // Yellow (>90C)
-        else -> Color(0xFF388E3C)       // Green
-    }
-    val contentColor = if (tempF in 195..248) Color.Black else Color.White
-    
-    DashboardCard(
-        label = "$label\nTemp",
-        value = "${tempF}°F",
-        containerColor = color,
-        contentColor = contentColor,
-        modifier = modifier
-    )
-}
-
-@Composable
 fun DashboardCard(
     label: String,
     value: String,
     modifier: Modifier = Modifier,
     containerColor: Color = MaterialTheme.colorScheme.surfaceVariant,
-    contentColor: Color = MaterialTheme.colorScheme.onSurface
+    contentColor: Color = MaterialTheme.colorScheme.onSurface,
+    valueFontSize: androidx.compose.ui.unit.TextUnit = 32.sp,
+    labelFontSize: androidx.compose.ui.unit.TextUnit = 16.sp,
+    content: (@Composable ColumnScope.() -> Unit)? = null
 ) {
     Card(
         modifier = modifier,
@@ -438,24 +512,37 @@ fun DashboardCard(
     ) {
         Column(
             modifier = Modifier
-                .padding(8.dp)
-                .fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(vertical = 4.dp, horizontal = 8.dp)
+                .fillMaxSize(), // Fill entire card area
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center // Center content vertically
         ) {
-            Text(
-                text = label.uppercase(Locale.US),
-                fontSize = 16.sp,
-                color = contentColor.copy(alpha = 0.7f),
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = value,
-                fontSize = 32.sp,
-                fontWeight = FontWeight.ExtraBold,
-                textAlign = TextAlign.Center
-            )
+            if (content != null) {
+                content()
+            } else {
+                Text(
+                    text = label.uppercase(Locale.US),
+                    fontSize = labelFontSize,
+                    color = contentColor.copy(alpha = 0.7f),
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    lineHeight = labelFontSize
+                )
+                Text(
+                    text = value,
+                    fontSize = valueFontSize,
+                    fontWeight = FontWeight.ExtraBold,
+                    textAlign = TextAlign.Center,
+                    lineHeight = valueFontSize
+                )
+            }
         }
     }
 }
+
+
+
+
+
+
+

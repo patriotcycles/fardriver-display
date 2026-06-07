@@ -26,13 +26,23 @@ data class FardriverData(
     val soc: Int = 0,
     val isRegenFromCurrent: Boolean = false,
     val odometerMiles: Double = 0.0,
-    val tripMiles: Double = 0.0
-)
+    val tripMiles: Double = 0.0,
+    val consumedAh: Double = 0.0
+) {
+    val ahPerMile: Double
+        get() = if (tripMiles > 0.05) consumedAh / tripMiles else 0.0
+
+    fun getEstimatedRange(totalAh: Float): Double {
+        val eff = ahPerMile
+        return if (eff > 0.1) (totalAh.toDouble() - consumedAh).coerceAtLeast(0.0) / eff else 0.0
+    }
+}
 
 data class FardriverSettings(
     val wheelCircumferenceM: Float = 1.999f,
     val motorPolePairs: Int = 10,
-    val speedMultiplier: Float = 1.0f
+    val speedMultiplier: Float = 1.0f,
+    val batteryAh: Float = 20.0f
 )
 
 class FardriverRepository(private val context: Context) {
@@ -52,7 +62,8 @@ class FardriverRepository(private val context: Context) {
     private val _uiState = MutableStateFlow(
         FardriverData(
             odometerMiles = sharedPrefs.getFloat("odometer", 0f).toDouble(),
-            tripMiles = sharedPrefs.getFloat("trip", 0f).toDouble()
+            tripMiles = sharedPrefs.getFloat("trip", 0f).toDouble(),
+            consumedAh = sharedPrefs.getFloat("consumed_ah", 0f).toDouble()
         )
     )
     val uiState: StateFlow<FardriverData> = _uiState
@@ -68,7 +79,7 @@ class FardriverRepository(private val context: Context) {
         0xE2, 0xE8, 0xEE, 0xE4, 0x06, 0x0C, 0x12, 0xE2, 0xE8, 0xEE, 0x18, 0x1E, 0x24, 0x2A,
         0xE2, 0xE8, 0xEE, 0x30, 0x5D, 0x63, 0x69, 0xE2, 0xE8, 0xEE, 0x7C, 0x82, 0x88, 0x8E,
         0xE2, 0xE8, 0xEE, 0x94, 0x9A, 0xA0, 0xA6, 0xE2, 0xE8, 0xEE, 0xAC, 0xB2, 0xB8, 0xBE,
-        0xE2, 0xE8, 0xEE, 0xC4, 0xCA, 0xD0, 0xE2, 0xE8, 0xEE, 0xD6, 0xDC, 0xF4, 0xFA
+        0xE2, 0xE8, 0xEE, 0xC4, 0xCA, 0xD0, 0xE2, 0xE8, 0xEE, 0xD6, 0xDC, 0xF4, 0xFA,
     )
 
     private var lastPacketTime = 0L
@@ -77,7 +88,8 @@ class FardriverRepository(private val context: Context) {
         return FardriverSettings(
             wheelCircumferenceM = sharedPrefs.getFloat("wheel_circ", 1.999f),
             motorPolePairs = sharedPrefs.getInt("pole_pairs", 10),
-            speedMultiplier = sharedPrefs.getFloat("speed_mult", 1.0f)
+            speedMultiplier = sharedPrefs.getFloat("speed_mult", 1.0f),
+            batteryAh = sharedPrefs.getFloat("battery_ah", 20.0f)
         )
     }
 
@@ -86,13 +98,17 @@ class FardriverRepository(private val context: Context) {
             putFloat("wheel_circ", newSettings.wheelCircumferenceM)
             putInt("pole_pairs", newSettings.motorPolePairs)
             putFloat("speed_mult", newSettings.speedMultiplier)
+            putFloat("battery_ah", newSettings.batteryAh)
         }
         _settings.value = newSettings
     }
 
     fun resetTrip() {
-        sharedPrefs.edit { putFloat("trip", 0f) }
-        _uiState.value = _uiState.value.copy(tripMiles = 0.0)
+        sharedPrefs.edit { 
+            putFloat("trip", 0f)
+            putFloat("consumed_ah", 0f)
+        }
+        _uiState.value = _uiState.value.copy(tripMiles = 0.0, consumedAh = 0.0)
     }
 
     @RequiresPermission(android.Manifest.permission.BLUETOOTH_SCAN)
@@ -253,11 +269,19 @@ class FardriverRepository(private val context: Context) {
         val newOdo = currentData.odometerMiles + distanceMiles
         val newTrip = currentData.tripMiles + distanceMiles
 
+        // Ah calculation: Ah = (Current * Time) / 3600
+        // Use max(0, lineCurrent) to only count consumption if desired, 
+        // but typically Ah/mi includes regen as negative consumption or net.
+        // Let's stick to net Ah for efficiency.
+        val consumedAhDelta = (currentData.lineCurrent * (timeDeltaMs / 1000.0f)) / 3600.0
+        val newConsumedAh = currentData.consumedAh + consumedAhDelta
+
         // Persist values to avoid data loss, using a small threshold to avoid excessive writes
         if (Math.abs(newOdo - sharedPrefs.getFloat("odometer", 0f)) > 0.05) {
             sharedPrefs.edit { 
                 putFloat("odometer", newOdo.toFloat())
                 putFloat("trip", newTrip.toFloat())
+                putFloat("consumed_ah", newConsumedAh.toFloat())
             }
         }
 
@@ -270,7 +294,8 @@ class FardriverRepository(private val context: Context) {
             speed = speed, 
             power = power, 
             odometerMiles = newOdo,
-            tripMiles = newTrip
+            tripMiles = newTrip,
+            consumedAh = newConsumedAh
         )
     }
 }
