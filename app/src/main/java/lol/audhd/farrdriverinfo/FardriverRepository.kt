@@ -5,17 +5,25 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
+import android.os.Bundle
 import android.os.ParcelUuid
 import androidx.annotation.RequiresPermission
 import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 data class FardriverData(
     val voltage: Float = 0f,
     val lineCurrent: Float = 0f,
+    val phaseACurrent: Float = 0f,
+    val phaseCCurrent: Float = 0f,
     val power: Float = 0f,
     val rpm: Float = 0f,
     val rawRpm: Short = 0,
@@ -27,15 +35,53 @@ data class FardriverData(
     val isRegenFromCurrent: Boolean = false,
     val odometerMiles: Double = 0.0,
     val tripMiles: Double = 0.0,
-    val consumedAh: Double = 0.0
+    val consumedAh: Double = 0.0,
+    val resetSoc: Int = 0,
+    // Error Flags
+    val motorHallError: Boolean = false,
+    val throttleError: Boolean = false,
+    val currentProtectRestart: Boolean = false,
+    val phaseCurrentSurgeProtect: Boolean = false,
+    val voltageProtect: Boolean = false,
+    val alarmProtect: Boolean = false,
+    val motorTempProtect: Boolean = false,
+    val controllerTempProtect: Boolean = false,
+    val phaseCurrentOverflowProtect: Boolean = false,
+    val phaseZeroError: Boolean = false,
+    val lineCurrentZeroError: Boolean = false,
+    val brakeActive: Boolean = false
 ) {
     val ahPerMile: Double
         get() = if (tripMiles > 0.05) consumedAh / tripMiles else 0.0
+
+    val estimatedCapacityAh: Double
+        get() {
+            val socDrop = resetSoc - soc
+            // Calculate every 1.0 Ah used, as long as SOC has dropped at least 1%
+            return if (socDrop >= 1 && consumedAh >= 1.0) (consumedAh * 100.0) / socDrop else 0.0
+        }
 
     fun getEstimatedRange(totalAh: Float): Double {
         val eff = ahPerMile
         return if (eff > 0.1) (totalAh.toDouble() - consumedAh).coerceAtLeast(0.0) / eff else 0.0
     }
+
+    val activeErrors: List<String>
+        get() {
+            val errors = mutableListOf<String>()
+            if (motorHallError) errors.add("Motor Hall Error")
+            if (throttleError) errors.add("Throttle Error")
+            if (currentProtectRestart) errors.add("Current Protect Restart")
+            if (phaseCurrentSurgeProtect) errors.add("Phase Current Surge")
+            if (voltageProtect) errors.add("Voltage Protect")
+            if (alarmProtect) errors.add("Alarm Protect")
+            if (motorTempProtect) errors.add("Motor Over-Temp")
+            if (controllerTempProtect) errors.add("Controller Over-Temp")
+            if (phaseCurrentOverflowProtect) errors.add("Phase Overflow")
+            if (phaseZeroError) errors.add("Phase Zero Error")
+            if (lineCurrentZeroError) errors.add("Line Zero Error")
+            return errors
+        }
 }
 
 data class FardriverSettings(
@@ -63,7 +109,8 @@ class FardriverRepository(private val context: Context) {
         FardriverData(
             odometerMiles = sharedPrefs.getFloat("odometer", 0f).toDouble(),
             tripMiles = sharedPrefs.getFloat("trip", 0f).toDouble(),
-            consumedAh = sharedPrefs.getFloat("consumed_ah", 0f).toDouble()
+            consumedAh = sharedPrefs.getFloat("consumed_ah", 0f).toDouble(),
+            resetSoc = sharedPrefs.getInt("reset_soc", 0)
         )
     )
     val uiState: StateFlow<FardriverData> = _uiState
@@ -82,7 +129,27 @@ class FardriverRepository(private val context: Context) {
         0xE2, 0xE8, 0xEE, 0xC4, 0xCA, 0xD0, 0xE2, 0xE8, 0xEE, 0xD6, 0xDC, 0xF4, 0xFA,
     )
 
+    private val locationManager by lazy { context.getSystemService(Context.LOCATION_SERVICE) as LocationManager }
+    private var lastGpsSpeedMs = 0f
     private var lastPacketTime = 0L
+
+    // Error debouncing
+    private val errorLatches = mutableMapOf<String, Long>()
+    private val errorHitCounts = mutableMapOf<String, Int>()
+    private val latchDurationMs = 5000L // Keep errors visible for 5 seconds to prevent flashing
+    private val hitsRequired = 3 // Must see error in 3 packets before showing
+
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            if (location.hasSpeed()) {
+                lastGpsSpeedMs = location.speed
+            }
+        }
+        @Deprecated("Deprecated in Java")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
+    }
 
     private fun loadSettings(): FardriverSettings {
         return FardriverSettings(
@@ -104,17 +171,36 @@ class FardriverRepository(private val context: Context) {
     }
 
     fun resetTrip() {
+        val currentSoc = _uiState.value.soc
         sharedPrefs.edit { 
             putFloat("trip", 0f)
             putFloat("consumed_ah", 0f)
+            putInt("reset_soc", currentSoc)
         }
-        _uiState.value = _uiState.value.copy(tripMiles = 0.0, consumedAh = 0.0)
+        _uiState.value = _uiState.value.copy(tripMiles = 0.0, consumedAh = 0.0, resetSoc = currentSoc)
     }
 
-    @RequiresPermission(android.Manifest.permission.BLUETOOTH_SCAN)
+    fun setOdometer(miles: Double) {
+        sharedPrefs.edit { putFloat("odometer", miles.toFloat()) }
+        _uiState.value = _uiState.value.copy(odometerMiles = miles)
+    }
+
+    @RequiresPermission(allOf = [android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.ACCESS_FINE_LOCATION])
     fun startScanning() {
         val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
         _connectionState.value = "Scanning..."
+
+        // Start GPS updates
+        try {
+            locationManager.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                500L,
+                0f,
+                locationListener
+            )
+        } catch (_: SecurityException) {
+            // Handle lack of permission if necessary, though it should be checked by caller
+        }
 
         val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(serviceUuid)).build()
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
@@ -217,11 +303,50 @@ class FardriverRepository(private val context: Context) {
         val timeDeltaMs = if (lastPacketTime > 0) currentTime - lastPacketTime else 0
         lastPacketTime = currentTime
 
+        // Clean up expired error latches
+        val expiredErrors = errorLatches.filter { currentTime - it.value > latchDurationMs }.keys
+        expiredErrors.forEach { errorLatches.remove(it) }
+
         when (address) {
             0xE2 -> {
                 val gear = ((pData[0].toInt() shr 2) and 0x03) + 1
                 val rawRpm = getShort(pData[6], pData[7])
-                currentData = currentData.copy(gear = gear, rawRpm = rawRpm)
+                
+                // Helper to handle debounced error detection
+                fun checkError(key: String, active: Boolean) {
+                    if (active) {
+                        val newCount = (errorHitCounts[key] ?: 0) + 1
+                        errorHitCounts[key] = newCount
+                        if (newCount >= hitsRequired) {
+                            errorLatches[key] = currentTime
+                        }
+                    } else {
+                        errorHitCounts[key] = 0 // Reset hit counter if bit goes low
+                    }
+                }
+
+                // Byte 4 Error Flags
+                val b4 = pData[4].toInt() and 0xFF
+                checkError("motorHallError", (b4 and 0x01) != 0)
+                checkError("throttleError", (b4 and 0x02) != 0)
+                // Note: bits 0x04 and 0x08 are ignored as they often signal normal operation status
+                checkError("voltageProtect", (b4 and 0x10) != 0)
+                checkError("alarmProtect", (b4 and 0x20) != 0)
+                checkError("motorTempProtect", (b4 and 0x40) != 0)
+                checkError("controllerTempProtect", (b4 and 0x80) != 0)
+
+                // Byte 5 Error Flags
+                val b5 = pData[5].toInt() and 0xFF
+                checkError("phaseCurrentOverflowProtect", (b5 and 0x01) != 0)
+                checkError("phaseZeroError", (b5 and 0x02) != 0)
+                checkError("lineCurrentZeroError", (b5 and 0x08) != 0)
+                val brakeActive = (b5 and 0x80) != 0
+
+                currentData = currentData.copy(
+                    gear = gear, 
+                    rawRpm = rawRpm,
+                    brakeActive = brakeActive
+                )
             }
             0xE8 -> {
                 val newVoltage = getUShort(pData[0], pData[1]) / 10.0f
@@ -238,6 +363,17 @@ class FardriverRepository(private val context: Context) {
                     isRegen = newCurrent < 0f
                 }
                 currentData = currentData.copy(lineCurrent = lineCurrent, isRegenFromCurrent = isRegen)
+            }
+            0xEE -> {
+                // Decode Phase A Current (24-bit Big Endian)
+                val rawPhaseA = ((pData[4].toInt() and 0xFF) shl 16) or ((pData[5].toInt() and 0xFF) shl 8) or (pData[6].toInt() and 0xFF)
+                val phaseACurrent = if (rawPhaseA > 0) (1.953125f * sqrt(rawPhaseA.toFloat())) else 0.0f
+
+                // Decode Phase C Current (24-bit Big Endian)
+                val rawPhaseC = ((pData[7].toInt() and 0xFF) shl 16) or ((pData[8].toInt() and 0xFF) shl 8) or (pData[9].toInt() and 0xFF)
+                val phaseCCurrent = if (rawPhaseC > 0) (1.953125f * sqrt(rawPhaseC.toFloat())) else 0.0f
+                
+                currentData = currentData.copy(phaseACurrent = phaseACurrent, phaseCCurrent = phaseCCurrent)
             }
             0xD6 -> {
                 val newControllerTemp = getShort(pData[10], pData[11]).toInt()
@@ -262,7 +398,8 @@ class FardriverRepository(private val context: Context) {
         val rpm = displayRawRpm * 4.0f / settings.motorPolePairs
         
         // Odometer calculation: distance = speed * time
-        val speedMs = (rpm / 60.0f) * settings.wheelCircumferenceM
+        // Use GPS speed for distance if available, otherwise fallback to 0 (or stay with last calculated)
+        val speedMs = lastGpsSpeedMs
         val distanceMeters = speedMs * (timeDeltaMs / 1000.0f)
         val distanceMiles = distanceMeters / 1609.344
         
@@ -277,7 +414,7 @@ class FardriverRepository(private val context: Context) {
         val newConsumedAh = currentData.consumedAh + consumedAhDelta
 
         // Persist values to avoid data loss, using a small threshold to avoid excessive writes
-        if (Math.abs(newOdo - sharedPrefs.getFloat("odometer", 0f)) > 0.05) {
+        if (abs(newOdo - sharedPrefs.getFloat("odometer", 0f)) > 0.05) {
             sharedPrefs.edit { 
                 putFloat("odometer", newOdo.toFloat())
                 putFloat("trip", newTrip.toFloat())
@@ -285,8 +422,7 @@ class FardriverRepository(private val context: Context) {
             }
         }
 
-        val speedKmh = (rpm * settings.wheelCircumferenceM * 60.0f) / 1000.0f
-        val speed = speedKmh * 0.621371f * settings.speedMultiplier
+        val speed = speedMs * 2.23694f * settings.speedMultiplier // m/s to mph
         val power = if (currentData.voltage > 0) currentData.voltage * currentData.lineCurrent else 0f
 
         _uiState.value = currentData.copy(
@@ -295,7 +431,20 @@ class FardriverRepository(private val context: Context) {
             power = power, 
             odometerMiles = newOdo,
             tripMiles = newTrip,
-            consumedAh = newConsumedAh
+            consumedAh = newConsumedAh,
+            // Update error states from latches
+            motorHallError = errorLatches.containsKey("motorHallError"),
+            throttleError = errorLatches.containsKey("throttleError"),
+            voltageProtect = errorLatches.containsKey("voltageProtect"),
+            alarmProtect = errorLatches.containsKey("alarmProtect"),
+            motorTempProtect = errorLatches.containsKey("motorTempProtect"),
+            controllerTempProtect = errorLatches.containsKey("controllerTempProtect"),
+            phaseCurrentOverflowProtect = errorLatches.containsKey("phaseCurrentOverflowProtect"),
+            phaseZeroError = errorLatches.containsKey("phaseZeroError"),
+            lineCurrentZeroError = errorLatches.containsKey("lineCurrentZeroError"),
+            // These are now permanently false as we've identified them as noisy status bits
+            currentProtectRestart = false,
+            phaseCurrentSurgeProtect = false
         )
     }
 }
