@@ -19,8 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -96,8 +95,17 @@ fun MainContent(repository: FardriverRepository) {
 
     when (screenState) {
         "settings" -> SettingsScreen(repository) { screenState = "dashboard" }
-        "quad" -> QuadDashboardScreen(repository, onOpenSettings = { screenState = "settings" }) { screenState = "dashboard" }
-        else -> DashboardScreen(repository, onOpenSettings = { screenState = "settings" }) { screenState = "quad" }
+        "quad" -> QuadDashboardScreen(
+            repository,
+            onOpenSettings = { screenState = "settings" },
+            onOpenErrors = { screenState = "errors" }
+        ) { screenState = "dashboard" }
+        "errors" -> ErrorScreen(repository) { screenState = "dashboard" }
+        else -> DashboardScreen(
+            repository,
+            onOpenSettings = { screenState = "settings" },
+            onOpenErrors = { screenState = "errors" }
+        ) { screenState = "quad" }
     }
 }
 
@@ -106,11 +114,11 @@ fun MainContent(repository: FardriverRepository) {
 fun DashboardScreen(
     repository: FardriverRepository, 
     onOpenSettings: () -> Unit,
+    onOpenErrors: () -> Unit,
     onSwitchDashboard: () -> Unit
 ) {
     val uiState by repository.uiState.collectAsState()
     val settings by repository.settings.collectAsState()
-    val status by repository.connectionState.collectAsState()
 
     var showTripResetDialog by remember { mutableStateOf(value = false) }
 
@@ -139,6 +147,14 @@ fun DashboardScreen(
                 title = { Text("Fardriver Dashboard", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 actions = {
+                    IconButton(onClick = onOpenErrors) {
+                        val uiState by repository.uiState.collectAsState()
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Errors",
+                            tint = if (uiState.activeErrors.isNotEmpty()) Color.Red else LocalContentColor.current
+                        )
+                    }
                     IconButton(onClick = onSwitchDashboard) {
                         Icon(Icons.Default.Dashboard, contentDescription = "Switch Layout")
                     }
@@ -156,56 +172,37 @@ fun DashboardScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Error Messages Area
-            if (uiState.activeErrors.isNotEmpty()) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                ) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        uiState.activeErrors.forEach { error ->
-                            Text(
-                                text = "⚠ $error",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Full Width Angled Bar Speed Gauge at the Top
-            Box(
+            // Large Digital Speed Readout (Replaces Sweep Gauge)
+            DashboardCard(
+                label = "Speed",
+                value = String.format(Locale.US, "%.0f", uiState.speed),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1.5f),
-                contentAlignment = Alignment.Center
-            ) {
-                AngledBarSpeedGauge(
-                    speed = uiState.speed,
-                    modifier = Modifier.fillMaxSize()
-                )
-                
-                // Brake Status Indicator (Overlaid)
-                if (uiState.brakeActive) {
-                    Card(
-                        modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.Red)
-                    ) {
-                        Text(
-                            "BRAKE",
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                            color = Color.White,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 14.sp
-                        )
-                    }
+                    .weight(1.0f), // Reduced further to 1.0f
+                containerColor = Color.Transparent,
+                contentColor = Color.White,
+                valueFontSize = 80.sp, // Reduced to 80.sp to ensure bottom visibility
+                labelFontSize = 16.sp
+            )
+            
+            // Brake Status Indicator (Overlaid)
+            if (uiState.brakeActive) {
+                Card(
+                    modifier = Modifier.align(Alignment.End).padding(end = 16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Red)
+                ) {
+                    Text(
+                        "BRAKE",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        color = Color.White,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 14.sp
+                    )
                 }
             }
 
             Row(
-                modifier = Modifier.weight(2.5f).fillMaxWidth(),
+                modifier = Modifier.weight(2.8f).fillMaxWidth(), // Increased from 2.5f to give bottom more space
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 // Vertical SOC Gauge (Increased Height)
@@ -224,22 +221,6 @@ fun DashboardScreen(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Connection Status Bar
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (status == "Connected") Color(0xFF1B5E20) else Color(0xFFB71C1C)
-                        )
-                    ) {
-                        Text(
-                            text = "Status: $status",
-                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                            color = Color.White,
-                            fontWeight = FontWeight.SemiBold,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
                     // Battery & Power Group
                     Row(
                         modifier = Modifier.fillMaxWidth().weight(1f),
@@ -309,17 +290,11 @@ fun DashboardScreen(
                                 StatItem("Ah/Mi", String.format(Locale.US, "%.2f", uiState.ahPerMile))
                                 StatItem("Used", String.format(Locale.US, "%.1fAh", uiState.consumedAh))
                                 StatItem("Range", String.format(Locale.US, "%.1fmi", uiState.getEstimatedRange(settings.batteryAh)))
-                                StatItem("Est Cap", String.format(Locale.US, "%.1fAh", uiState.estimatedCapacityAh))
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                StatItem("RPM", String.format(Locale.US, "%.0f", uiState.rpm))
                                 StatItem("Trip", String.format(Locale.US, "%.1fmi", uiState.tripMiles))
                                 StatItem("ODO", String.format(Locale.US, "%.1fmi", uiState.odometerMiles))
-                            }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 StatItem("Ph A", String.format(Locale.US, "%.1fA", uiState.phaseACurrent))
-                                StatItem("Ph C", String.format(Locale.US, "%.1fA", uiState.phaseCCurrent))
-                                StatItem("Range", String.format(Locale.US, "%.1fmi", uiState.getEstimatedRange(settings.batteryAh)))
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -355,6 +330,7 @@ fun DashboardScreen(
 fun QuadDashboardScreen(
     repository: FardriverRepository,
     onOpenSettings: () -> Unit,
+    onOpenErrors: () -> Unit,
     onSwitchDashboard: () -> Unit
 ) {
     val uiState by repository.uiState.collectAsState()
@@ -365,6 +341,13 @@ fun QuadDashboardScreen(
                 title = { Text("Retro Analog View", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 actions = {
+                    IconButton(onClick = onOpenErrors) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Errors",
+                            tint = if (uiState.activeErrors.isNotEmpty()) Color.Red else LocalContentColor.current
+                        )
+                    }
                     IconButton(onClick = onSwitchDashboard) {
                         Icon(Icons.Default.Speed, contentDescription = "Switch Layout")
                     }
@@ -383,25 +366,6 @@ fun QuadDashboardScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Error Messages Area
-            if (uiState.activeErrors.isNotEmpty()) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                ) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        uiState.activeErrors.forEach { error ->
-                            Text(
-                                text = "⚠ $error",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-                }
-            }
-
             // Centered Main Auto Meter Gauge (Speed + Digital Voltage)
             Box(
                 modifier = Modifier
@@ -411,6 +375,7 @@ fun QuadDashboardScreen(
             ) {
                 AutoMeterGauge(
                     speed = uiState.speed,
+                    amps = uiState.lineCurrent,
                     voltage = uiState.voltage,
                     modifier = Modifier.size(360.dp)
                 )
@@ -443,16 +408,16 @@ fun QuadDashboardScreen(
                 SmallRetroGauge(
                     label = "MCU TEMP",
                     value = ((uiState.controllerTemp * 9f) / 5f) + 32f,
-                    minValue = 0f,
-                    maxValue = 250f,
+                    minValue = 60f,
+                    maxValue = 180f,
                     unit = "°F",
                     modifier = Modifier.weight(1f).aspectRatio(1f)
                 )
                 SmallRetroGauge(
                     label = "MOTOR TEMP",
                     value = ((uiState.motorTemp * 9f) / 5f) + 32f,
-                    minValue = 0f,
-                    maxValue = 300f,
+                    minValue = 60f,
+                    maxValue = 180f,
                     unit = "°F",
                     modifier = Modifier.weight(1f).aspectRatio(1f)
                 )
@@ -500,13 +465,13 @@ fun StatItem(label: String, value: String, color: Color = Color.Unspecified) {
             label.uppercase(Locale.US),
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            color = Color.White.copy(alpha = 0.6f),
         )
         Text(
             value,
             fontSize = 18.sp,
             fontWeight = FontWeight.ExtraBold,
-            color = if (color == Color.Unspecified) MaterialTheme.colorScheme.onSurface else color,
+            color = if (color == Color.Unspecified) Color.White else color,
         )
     }
 }
@@ -514,6 +479,7 @@ fun StatItem(label: String, value: String, color: Color = Color.Unspecified) {
 @Composable
 fun AutoMeterGauge(
     speed: Float,
+    amps: Float,
     voltage: Float,
     modifier: Modifier = Modifier
 ) {
@@ -600,7 +566,7 @@ fun AutoMeterGauge(
 
         // Branding
         drawContext.canvas.nativeCanvas.drawText(
-            "AUTO METER",
+            "MPH",
             center.x,
             center.y - radius * 0.5f,
             android.graphics.Paint().apply {
@@ -611,40 +577,40 @@ fun AutoMeterGauge(
             }
         )
 
-        // 4. SUB-GAUGE VOLTAGE (Analog Nested)
-        val voltCenter = Offset(center.x, center.y + radius * 0.45f)
-        val voltRadius = radius * 0.35f
-        val voltStartAngle = 150f
-        val voltSweepAngle = 240f
-        val minVolt = 42f
-        val maxVolt = 68f
+        // 4. SUB-GAUGE AMPS (Analog Nested) - Range 0 to 60
+        val subCenter = Offset(center.x, center.y + radius * 0.45f)
+        val subRadius = radius * 0.35f
+        val subStartAngle = 150f
+        val subSweepAngle = 240f
+        val minAmps = 0f
+        val maxAmps = 60f
 
-        // Volt Ticks
-        for (v in 42..68 step 2) {
-            val vAngle = voltStartAngle + ((v - minVolt) / (maxVolt - minVolt)) * voltSweepAngle
-            val vAngleRad = Math.toRadians(vAngle.toDouble())
-            val isMajorV = v % 10 == 0 || v == 42 || v == 68
+        // Amps Ticks
+        for (a in 0..60 step 5) {
+            val aAngle = subStartAngle + ((a - minAmps) / (maxAmps - minAmps)) * subSweepAngle
+            val aAngleRad = Math.toRadians(aAngle.toDouble())
+            val isMajorA = a % 10 == 0
             
-            val vTickLen = if (isMajorV) voltRadius * 0.2f else voltRadius * 0.1f
-            val vStart = Offset(
-                x = voltCenter.x + (voltRadius - vTickLen) * cos(vAngleRad).toFloat(),
-                y = voltCenter.y + (voltRadius - vTickLen) * sin(vAngleRad).toFloat()
+            val aTickLen = if (isMajorA) subRadius * 0.2f else subRadius * 0.1f
+            val aStart = Offset(
+                x = subCenter.x + (subRadius - aTickLen) * cos(aAngleRad).toFloat(),
+                y = subCenter.y + (subRadius - aTickLen) * sin(aAngleRad).toFloat()
             )
-            val vEnd = Offset(
-                x = voltCenter.x + voltRadius * cos(vAngleRad).toFloat(),
-                y = voltCenter.y + voltRadius * sin(vAngleRad).toFloat()
+            val aEnd = Offset(
+                x = subCenter.x + subRadius * cos(aAngleRad).toFloat(),
+                y = subCenter.y + subRadius * sin(aAngleRad).toFloat()
             )
             
-            drawLine(color = Color.Black, start = vStart, end = vEnd, strokeWidth = 1.dp.toPx())
+            drawLine(color = Color.Black, start = aStart, end = aEnd, strokeWidth = 1.dp.toPx())
             
-            if (isMajorV) {
-                val vTextRadius = voltRadius * 0.65f
-                val vtx = voltCenter.x + vTextRadius * cos(vAngleRad).toFloat()
-                val vty = voltCenter.y + vTextRadius * sin(vAngleRad).toFloat()
+            if (isMajorA) {
+                val aTextRadius = subRadius * 0.65f
+                val atx = subCenter.x + aTextRadius * cos(aAngleRad).toFloat()
+                val aty = subCenter.y + aTextRadius * sin(aAngleRad).toFloat()
                 drawContext.canvas.nativeCanvas.drawText(
-                    v.toString(),
-                    vtx,
-                    vty + 4.dp.toPx(),
+                    a.toString(),
+                    atx,
+                    aty + 4.dp.toPx(),
                     android.graphics.Paint().apply {
                         color = android.graphics.Color.BLACK
                         textSize = 10.sp.toPx()
@@ -654,10 +620,21 @@ fun AutoMeterGauge(
             }
         }
 
-        // 5. LCD DISPLAY (Digital Voltage Readout at the Bottom)
+        drawContext.canvas.nativeCanvas.drawText(
+            "AMPS",
+            subCenter.x,
+            subCenter.y + subRadius * 0.3f,
+            android.graphics.Paint().apply {
+                color = android.graphics.Color.BLACK
+                textSize = 8.sp.toPx()
+                textAlign = android.graphics.Paint.Align.CENTER
+            }
+        )
+
+        // 5. LCD DISPLAY (Digital Voltage Readout)
         val lcdWidth = radius * 0.35f
         val lcdHeight = radius * 0.12f
-        val lcdTop = center.y + radius * 0.62f // Moved up significantly to avoid bezel
+        val lcdTop = center.y - radius * 0.35f // Moved up significantly to avoid bezel
         val lcdLeft = center.x - lcdWidth / 2
         
         // LCD Background
@@ -691,20 +668,20 @@ fun AutoMeterGauge(
         )
 
         // 6. NEEDLES
-        // Voltage Needle (Small Analog)
-        val vCurrentAngle = voltStartAngle + ((voltage.coerceIn(minVolt, maxVolt) - minVolt) / (maxVolt - minVolt)) * voltSweepAngle
-        val vNeedleRad = Math.toRadians(vCurrentAngle.toDouble())
+        // Amps Needle (Small Analog)
+        val aCurrentAngle = subStartAngle + ((amps.coerceIn(minAmps, maxAmps) - minAmps) / (maxAmps - minAmps)) * subSweepAngle
+        val aNeedleRad = Math.toRadians(aCurrentAngle.toDouble())
         drawLine(
             color = Color(0xFFFF4500),
-            start = voltCenter,
+            start = subCenter,
             end = Offset(
-                x = voltCenter.x + (voltRadius * 0.85f) * cos(vNeedleRad).toFloat(),
-                y = voltCenter.y + (voltRadius * 0.85f) * sin(vNeedleRad).toFloat()
+                x = subCenter.x + (subRadius * 0.85f) * cos(aNeedleRad).toFloat(),
+                y = subCenter.y + (subRadius * 0.85f) * sin(aNeedleRad).toFloat()
             ),
             strokeWidth = 2.5.dp.toPx(),
             cap = StrokeCap.Round
         )
-        drawCircle(color = Color.Black, radius = 4.dp.toPx(), center = voltCenter)
+        drawCircle(color = Color.Black, radius = 4.dp.toPx(), center = subCenter)
 
         // Speed Needle (Large)
         val sCurrentAngle = speedStartAngle + (speed.coerceIn(0f, maxSpeed) / maxSpeed) * speedSweepAngle
@@ -1033,89 +1010,6 @@ fun SettingsScreen(repository: FardriverRepository, onBack: () -> Unit) {
 }
 
 @Composable
-fun AngledBarSpeedGauge(speed: Float, modifier: Modifier = Modifier) {
-    val maxSpeed = 50f
-    val primaryColor = MaterialTheme.colorScheme.primary
-
-    Canvas(modifier = modifier) {
-        val width = size.width
-        val height = size.height
-        
-        // Large circular arc sweeping across the top
-        val radius = width * 0.45f
-        val center = Offset(width / 2, height * 0.95f)
-        
-        val startAngle = 180f
-        val sweepAngle = 180f
-        val currentAngle = (speed.coerceIn(0f, maxSpeed) / maxSpeed) * sweepAngle + startAngle
-
-        // Background Arc (Very light gray)
-        drawArc(
-            color = Color.LightGray.copy(alpha = 0.1f),
-            startAngle = startAngle,
-            sweepAngle = sweepAngle,
-            useCenter = false,
-            style = Stroke(width = 24.dp.toPx(), cap = StrokeCap.Round)
-        )
-
-        // Value Arc
-        drawArc(
-            color = primaryColor,
-            startAngle = startAngle,
-            sweepAngle = currentAngle - startAngle,
-            useCenter = false,
-            style = Stroke(width = 24.dp.toPx(), cap = StrokeCap.Round)
-        )
-
-        // Numbers - Positioned OUTSIDE the gray area
-        for (i in 0..50 step 10) {
-            val angle = startAngle + (i / maxSpeed) * sweepAngle
-            val angleRad = Math.toRadians(angle.toDouble())
-            
-            // Text radius is larger than arc radius to keep numbers outside
-            val textRadius = radius + 25.dp.toPx()
-            val tx = center.x + textRadius * cos(angleRad).toFloat()
-            val ty = center.y + textRadius * sin(angleRad).toFloat()
-            
-            drawContext.canvas.nativeCanvas.drawText(
-                i.toString(),
-                tx,
-                ty + 5.dp.toPx(),
-                android.graphics.Paint().apply {
-                    color = android.graphics.Color.BLACK
-                    textSize = 14.sp.toPx()
-                    textAlign = android.graphics.Paint.Align.CENTER
-                    isFakeBoldText = true
-                }
-            )
-        }
-
-        // Digital display below the arc
-        drawContext.canvas.nativeCanvas.drawText(
-            String.format(Locale.US, "%.0f", speed),
-            center.x,
-            center.y - 15.dp.toPx(),
-            android.graphics.Paint().apply {
-                color = android.graphics.Color.BLACK
-                textSize = 80.sp.toPx()
-                textAlign = android.graphics.Paint.Align.CENTER
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-        )
-        drawContext.canvas.nativeCanvas.drawText(
-            "MPH",
-            center.x,
-            center.y + 15.dp.toPx(),
-            android.graphics.Paint().apply {
-                color = Color.Black.copy(alpha = 0.6f).toArgb()
-                textSize = 18.sp.toPx()
-                textAlign = android.graphics.Paint.Align.CENTER
-            }
-        )
-    }
-}
-
-@Composable
 fun VerticalBatteryGauge(soc: Int, voltage: Float, modifier: Modifier = Modifier) {
     val gaugeColor = when {
         soc >= 50 -> androidx.compose.ui.graphics.lerp(
@@ -1178,9 +1072,119 @@ fun VerticalBatteryGauge(soc: Int, voltage: Float, modifier: Modifier = Modifier
                 text = String.format(Locale.US, "%.1fV", voltage),
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                color = Color.White
             )
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ErrorScreen(repository: FardriverRepository, onBack: () -> Unit) {
+    val uiState by repository.uiState.collectAsState()
+    val status by repository.connectionState.collectAsState()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("System Diagnostics") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            )
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Connection Status Bar
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (status == "Connected") Color(0xFF1B5E20) else Color(0xFFB71C1C)
+                )
+            ) {
+                Text(
+                    text = "Status: $status",
+                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Text(
+                text = "Active Errors",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.error
+            )
+
+            if (uiState.activeErrors.isEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1B5E20).copy(alpha = 0.1f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(Icons.Default.Dashboard, contentDescription = null, tint = Color(0xFF4CAF50))
+                        Text("System healthy. No active faults detected.", fontWeight = FontWeight.Medium)
+                    }
+                }
+            } else {
+                uiState.activeErrors.forEach { error ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                            Text(text = error, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            Text(
+                text = "System Status",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            StatusInfoRow("Brake Signal", if (uiState.brakeActive) "ACTIVE" else "Inactive", if (uiState.brakeActive) Color.Red else Color.Unspecified)
+            StatusInfoRow("Throttle Error", if (uiState.throttleError) "FAULT" else "OK", if (uiState.throttleError) Color.Red else Color.Unspecified)
+            StatusInfoRow("Hall Sensors", if (uiState.motorHallError) "FAULT" else "OK", if (uiState.motorHallError) Color.Red else Color.Unspecified)
+            StatusInfoRow("MCU Temp", "${uiState.controllerTemp}°C", if (uiState.controllerTempProtect) Color.Red else Color.Unspecified)
+            StatusInfoRow("Motor Temp", "${uiState.motorTemp}°C", if (uiState.motorTempProtect) Color.Red else Color.Unspecified)
+            StatusInfoRow("Voltage Status", if (uiState.voltageProtect) "PROTECT" else "OK", if (uiState.voltageProtect) Color.Red else Color.Unspecified)
+        }
+    }
+}
+
+@Composable
+fun StatusInfoRow(label: String, value: String, valueColor: Color = Color.Unspecified) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+        Text(text = value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = valueColor)
     }
 }
 
@@ -1190,7 +1194,7 @@ fun DashboardCard(
     value: String,
     modifier: Modifier = Modifier,
     containerColor: Color = MaterialTheme.colorScheme.surfaceVariant,
-    contentColor: Color = MaterialTheme.colorScheme.onSurface,
+    contentColor: Color = Color.White, // Pure white font
     valueFontSize: androidx.compose.ui.unit.TextUnit = 32.sp,
     labelFontSize: androidx.compose.ui.unit.TextUnit = 16.sp,
     content: (@Composable ColumnScope.() -> Unit)? = null
